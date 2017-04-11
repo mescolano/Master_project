@@ -1,0 +1,175 @@
+---
+title: "3 Time series visualisation"
+author: "Marcos Escudero Olano"
+date: "9 de abril de 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this section we will explore the aggregated full dataset visually. This can help us understand the data better and detect trends and cycles in order to gain a better insight into which models can presumably be more useful for analysis and prediction.
+
+First of all, let us load the dataset
+
+```{r read}
+df <- read.csv('agg_stats.csv')
+```
+
+...and the libraries we need.
+
+```{r libs}
+library(zoo)
+library(xts)
+library(readxl)
+library(ggplot2)
+library(scales)
+```
+
+Before plotting the data we need to do some basic transformations:
+
+```{r stats.process}
+df <- df[,2:10] #Remove first column, which is just a non-informative index
+df <- na.omit(df)
+df$DateTime <- strptime(df$DateTime, format = "%Y-%m-%d %H:%M:%S")
+```
+
+We also need to load the file with the tariffs applied to dToU users in each 30-min interval:
+
+```{r read.tariff}
+tariffs <- read_excel("Datos/SmartMeter_London/Tariffs.xlsx")
+```
+
+The file just tells us the tariff level (Low, Normal, High). Let us include the values in p/kWh (GBP*0.01/kWh) in the dataframe.
+
+```{r tariff}
+tariff.value <- function(x){
+  if(x == "High")
+    return(67.20)
+  else if(x=="Low")
+    return(3.99)
+  return(11.76) #Normal price
+}
+
+tariffs$Tariff_pence_per_kWh <- sapply(tariffs$Tariff,tariff.value)
+tariffs$Tariff <- as.factor(tariffs$Tariff)
+```
+
+
+## Time series plotting and comparison
+
+One of the main purposes of this work is to evaluate the behavioural differences of electricity users when subjected to a dynamic time of use (dToU) tariff. Thus, we will divide our dataset into Standard and dToU users:
+
+```{r divide}
+df.std <- df[df$Tariff == 'Std',]
+df.ToU <- df[df$Tariff == 'ToU',]
+```
+
+We will take the mean consumption for now. We will create an xts object with the mean column ordered by DateTime for ease of use:
+
+```{r to.xts}
+X.std <- xts(df.std[,7], order.by = df.std[,1])
+X.ToU <- xts(df.ToU[,7], order.by = df.ToU[,1])
+```
+
+To start with, let us plot the whole standard users time series:
+
+```{r consumption.all, echo=FALSE}
+ggplot(X.std,aes(index(X.std), coredata(X.std)))+geom_line()+
+  labs(title="Mean consumption of users subject to standard flat rate tariff", x="DateTime", y="Mean consumption [kWh/30min]")
+```
+
+This plot is not so informative but it already gives us some hints. There is a clear seasonailty with consumption peaks in winter (January to March) and lows in summer (June to September). This is expected as London has an oceanic climate with mild summers and cool winters, so air conditioning use is not common while heating in winter is widespread.
+
+To visualise it more clearly, we can calculate the monthly mean of each tariff group mean consumption during 2013:
+
+```{r monthly}
+std.mon <- apply.monthly(X.std['2013'],mean)
+ToU.mon <- apply.monthly(X.ToU['2013'],mean)
+```
+
+```{r monthly.plot, echo=FALSE}
+ggplot()+
+  geom_line(data=std.mon,aes(index(std.mon), coredata(std.mon),colour="Std"))+
+  geom_line(data=ToU.mon,aes(index(ToU.mon), coredata(ToU.mon),colour="ToU"))+
+  labs(title="Mean consumption of users by tariff (monthly averaged)",
+        x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%m/%Y"), date_breaks = "1 month")+
+  scale_colour_manual(name="Tariff", values = c("Std" = "orange", "ToU" = "blue"))
+```
+
+
+We can create daily mean plots too to increase the resolution but still be able to interpret the plot.
+
+```{r daily}
+std.day13 <- apply.daily(X.std['2013'],mean)
+ToU.day13 <- apply.daily(X.ToU['2013'],mean)
+colnames(std.day13) <- "consumption"
+colnames(ToU.day13) <- "consumption"
+
+std.day12 <- apply.daily(X.std['2012'],mean)
+ToU.day12 <- apply.daily(X.ToU['2012'],mean)
+colnames(std.day12) <- "consumption"
+colnames(ToU.day12) <- "consumption"
+```
+
+```{r daily.plot, echo=FALSE}
+ggplot()+
+  geom_line(data=std.day13,aes(index(std.day13), coredata(std.day13),colour="Std"))+
+  geom_line(data=ToU.day13,aes(index(ToU.day13), coredata(ToU.day13),colour="ToU"))+
+  labs(title="Mean consumption of users by tariff (daily averaged)",
+       x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%m/%Y"), date_breaks = "1 month", date_minor_breaks = "1 week" )+
+  scale_colour_manual(name="Tariff", values = c("Std" = "orange", "ToU" = "blue"))
+```
+
+
+In these plots it is clear that the dToU users consumption was considerable lower than that of the standard users throughout all 2013. This hints to the fact that both tariff groups do not have the same user profiles, so we should check their behaviour in 2012 too, when both were subjected to the standard flat rate tariff.
+
+```{r daily12.plot, echo=FALSE}
+ggplot()+
+  geom_line(data=std.day12,aes(index(std.day12), coredata(std.day12),colour="Std"))+
+  geom_line(data=ToU.day12,aes(index(ToU.day12), coredata(ToU.day12),colour="ToU"))+
+  labs(title="Mean consumption of users by tariff (daily averaged)",
+       x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%m/%Y"), date_breaks = "1 month", date_minor_breaks = "1 week" )+
+  scale_colour_manual(name="Tariff", values = c("Std" = "orange", "ToU" = "blue"))
+```
+
+The daily averaged plot for 2012 confirms our suspicions. Let us compare the daily averaged consumption profile of ToU users in 2012 and 2013. In order to plot both on the same time axis, we will add one year to the 2012 dates:
+
+```{r daily.tou.1213}
+df2013 <- df[df$DateTime > '2012-12-31' & df$DateTime < '2014-01-01',]
+df2012 <- df[df$DateTime > '2011-12-31' & df$DateTime < '2013-01-01',] 
+df2012.n <- df2012
+df2012.n$DateTime <- as.POSIXlt(df2012.n$DateTime)
+df2012.n$DateTime$year <- df2012.n$DateTime$year + 1
+df2012.n$DateTime <- as.POSIXct(df2012.n$DateTime)
+
+X.ToU13 <- X.ToU['2013']
+X.ToU12n <- xts(df2012.n$mean, order.by = df2012.n$DateTime)
+X.std13 <- X.std['2013']
+
+ToU.day12n <- apply.daily(X.ToU12n,mean)
+colnames(ToU.day12n) <- "consumption"
+```
+
+```{r daily.tou.1213.plot,echo=FALSE}
+ggplot()+
+  geom_line(data=ToU.day13,aes(index(ToU.day13), coredata(ToU.day13),colour="ToU users 2013"))+
+  geom_line(data=ToU.day12n,aes(index(ToU.day12n), coredata(ToU.day12n),colour="ToU users Std Tariff 2012"))+
+  labs(title="Mean consumption of users by tariff (daily averaged)",
+       x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%m/%Y"), date_breaks = "1 month", date_minor_breaks = "1 week" )+
+  scale_colour_manual(name="Tariff",
+                      values = c("ToU users 2013" = "orange", "ToU users Std Tariff 2012" = "blue"))
+```
+
+The daily averaged consumption is lower in most periods in 2013 (when they were subjected to ToU) than in 2012 (with the standard tariff). We have not considered the meteorological variables which could play a role (although they are unlikely to account for a large part of the effect throughout an entire year) and this is anyway a too high-level insight to derive final conclusions.
+
+Now we should study the dToU tariff evolution in 2013 and its influence in the electricity consumption of users subjected to it.
