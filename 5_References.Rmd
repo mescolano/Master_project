@@ -1,0 +1,20 @@
+---
+title: "5. References"
+output: html_document
+---
+
+[1] N. Yu, S. Shah, R. Johnson, R. Sherick, M. Hong, K. Loparo. "Big Data Analytics in Power Distribution Systems".
+
+[2] A. Albert, R. Rajagopal. "Smart Meter Driven Segmentation: What your consumption says about you". IEEE Transactions on Power Systems (2013).
+
+[3] C. Flath, D. Nicolay, T. Conte, C. van Dinther, L. Filipova-Neumann. "Cluster Analysis of Smart Metering Data". BISE Research Paper (2011).
+
+[4] T. Zufferey, A. Ulbig, S. Koch, G. Hug. "Forecasting of Smart Meter Time Series Based on Neural Networks".
+
+[5] P. Dagnely, T. Ruette, T. Tourwé, E. Tsiporkova, C. Verhelst. "Predicting Hourly Energy Consumption. Can Regression Modeling Improve on an Autoregressive Baseline?"
+
+[6] W. Shen, V. Babushkin, Z. Aung, and W. L. Woon. "An Ensemble Model for Day-ahead Electricity Demand Time Series Forecasting".
+
+[7] https://datahub.io/dataset/smartmeter-energy-use-data-in-london-households
+
+[8] Francisco Martínez Álvarez, Alicia Troncoso, José C. Riquelme, Jesús S. Aguilar Ruiz. "Energy Time Series Forecasting Based on Pattern Sequence Similarity".

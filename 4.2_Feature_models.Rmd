@@ -1,0 +1,547 @@
+---
+title: "4.2 Aggregate demand prediction with feature models"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 4.2.1. Introduction
+
+We will predict the aggregate demand using the features engineered Section 4.1 (using Python). We will apply linear models and, depending on the accuracy of the prediction, we may try other algorithms. It is worth reminding that dedicated time series modelling, namely exponential smoothing, will be applied in the next section.
+
+We will start with Ordinary Least Squares and then regularised linear regression: Lasso and Ridge.
+
+We have splitted the dataset in Train and Test sets and perform 10-fold Cross-Validation. The train set contains data from 30th November 2011 09:00 to 30th September 2013 23:30 and the test set from 1st October 2013 to the dataset end (28th February 2014 00:00). Note that the first three weeks from the original dataset have been removed as not enough data were available to construct our features.
+
+Our target variable (y) is mean_cons: the mean consumption in kWh/30min. The predictors are:
+-13 derived features (based on previous consumption data).
+-Day of week (7 levels)
+-Holiday (binary)
+-4 weather variables (Temperature, Relative humidity, Atmospheric pressure, Cloud cover). The last two are an indirect measure of the precipitation (which is not available) and general weather conditions.
+-Tariff
+
+The month was not included as only one year of ToU data is available so not all months will be available for ToU users in neither the train nor the test sets. Furthermore, it would add a categorical variable with 12 levels and other variables account for monthly effects (weather data and the derived features).
+
+The time series can be broken down in two: Standard flat rate users (all users in 2011, 2012 and 2014 and those not subjected to ToU in 2013) and ToU users (only in 2013). This means that a presumably important predict, which is the tariff value, only influences ToU users. 
+
+One approach could be to do separate models for standard and ToU users, but we will do one model for both. Moreover, the tariff price is a numerical value in nature, but it is not a continuous variables, as it takes only 3 possible levels in ToU and another 1 different constant level in the standard tariff. To take into account both effects, we will first try an Ordinary Least Sqaures (OLS) considering the tariff as a numerical variable but only for ToU consumers (by including in the model only the interaction between tariff value and a binary variable whose value is 1 when the user is subject to ToU). Then, we will consider the tariff as a categorical variable with 4 levels, thus making the difference between standard and ToU users and the 3 different possible tariff values.
+
+## 4.2.2. Data preparation
+
+The data has already been processed but we need a few changes to use it in our models.
+
+First, let us download the data and parse the DateTime column to the appropriate format. We also drop some variables not needed in the feature models nor for processing.
+
+```{r data.load}
+df <- read.csv('outputs/features_model.csv')
+df$DateTime <- as.POSIXct(df$DateTime, tz= "Europe/London", format = "%Y-%m-%d %H:%M:%S")
+df <- subset(df, select = -c(Date,Year,Month))
+head(df)
+```
+
+## 4.2.3. Linear models
+
+First, we can calculate the naïve predictor: the mean of the response value. We do it for the whole dataset and for standard and ToU separately as we are also interested in knowing how good the models are to predict ToU users aggregate demand.
+
+```{r means}
+y.std.mean <- mean(df[df["ToU"] == 0,"mean_cons"])
+y.ToU.mean <- mean(df[df["ToU"] == 1,"mean_cons"])
+y.mean <- mean(df$mean_cons)
+
+```
+
+### Ordinary Least Squares
+
+Now we will fit an Ordinary Leasts Squares model to the train dataset. 
+
+```{r ols.fit}
+ols <- lm(mean_cons ~ Tariff_value:ToU + Holiday + temperature + humidity + cloudCover + pressure + DoW + Time  + mean_prev_day +
+            + mean_cons_.1380 + mean_cons_.1410 + mean_cons_.1440 + mean_last3d_.0 + mean_last3d_.30 + mean_last3d_.60 + 
+            + mean_last3d_.90 + mean_last3w_.0 + mean_last3w_.30 + mean_last3w_.60 + mean_last3w_.90, data = subset(df, Set == "Train"))
+pred.ols <- predict.lm(ols, newdata = subset(df, Set == "Test", select = -c(Set,mean_cons)))
+rmse.ols <- mean((pred.ols - df[df["Set"] == "Test", "mean_cons"])^2)^(1/2)
+rmse.ols
+rmse.ols/y.mean
+```
+
+The normalised RMSE in the test data is 8.6%. 
+
+```{r ToU.ols.fit}
+pred.ToU.ols <- predict.lm(ols, newdata = df[df["Set"] == "Test" & df["ToU"] == 1,])
+rmse.ToU.ols <- mean((pred.ToU.ols - df[df["Set"] == "Test" & df["ToU"] == 1, "mean_cons"])^2)^(1/2)
+rmse.ToU.ols
+rmse.ToU.ols/y.ToU.mean
+```
+
+For ToU data points the RMSE is 10%. 
+
+It is also interesting to look at the regression coefficients.
+
+```{r ols.summary}
+summary(ols)
+ols$coefficients['Tariff_value:ToU']*(67.20 - 11.76)/y.ToU.mean
+ols$coefficients['Tariff_value:ToU']*(3.99 - 11.76)/y.ToU.mean
+```
+
+An advantage of OLS is that we can interpret the model easily, identifying the effect of each predictor in the independent variable. All derived features have a significant effect at the 5% level (and all but one at 0.1%). Only holiday has a small and non-significant effect in predicting the electricity consumption. Furthermoer, the tariff value has a significant negative effect (meaning less consumption when the price of electricty is higher) for ToU users, suggesting that a significant portion of them have responded to this stimulus as we analysed in Section 3. The regression coeffcient indicates 9% less consumption with the high tariff compared to the normal tariff.
+
+However, as it has been discussed, treating the tariff value as a continuous variable is probably not a good approach as there are only 3 possible tariff levels for ToU users, and they are not equally spaced. Therefore, we will do another prediction with the same OLS model but included the tariff value as a categorical variable.
+
+```{r ols2.fit}
+df2 <- df
+df2$Tariff <- as.factor(df2$Tariff_value)
+levels(df2$Tariff) <- c("ToU_Low", "ToU_Normal", "Std", "ToU_High")
+df2$Tariff <- relevel(df2$Tariff, "Std")
+
+ols2 <- lm(mean_cons ~ Tariff + Holiday + temperature + humidity + cloudCover + pressure + DoW + Time  + mean_prev_day +
+            + mean_cons_.1380 + mean_cons_.1410 + mean_cons_.1440 + mean_last3d_.0 + mean_last3d_.30 + mean_last3d_.60 + 
+            + mean_last3d_.90 + mean_last3w_.0 + mean_last3w_.30 + mean_last3w_.60 + mean_last3w_.90, data = subset(df2, Set == "Train"))
+pred.ols2 <- predict.lm(ols2, newdata = subset(df2, Set == "Test", select = -c(Set,mean_cons)))
+mse.ols2 <- mean((pred.ols2 - subset(df2, Set == "Test")$mean_cons)^2)
+mse.ols2
+mse.ols2/y.mean
+
+pred.ToU.ols2 <- predict.lm(ols2, newdata = df2[df2["Set"] == "Test" & df2["ToU"] == 1,])
+mse.ToU.ols2 <- mean((pred.ToU.ols2 - df2[df2["Set"] == "Test" & df2["ToU"] == 1, "mean_cons"])^2)
+mse.ToU.ols2
+mse.ToU.ols2/y.ToU.mean
+
+```
+
+R-squared is 0.946 and RMSE values is just marginally better in the second model.
+
+```{r ols2.summary}
+summary(ols2)
+```
+
+The coefficients show similar trends as in the first model. However, now the interpretation of the tariff influence can be more accurate as it shall not be linear with the tariff value. The influence of the tariff on the consumption is not linear with the tariff value, which looks more reasonable.
+
+```{r ols2.tariff}
+(ols2$coefficients['TariffToU_High'] - ols2$coefficients['TariffToU_Normal'])/y.ToU.mean
+(ols2$coefficients['TariffToU_Low'] - ols2$coefficients['TariffToU_Normal'])/y.ToU.mean
+```
+
+Consumption is predicted 7.2% higher with the low tariff (3.99 p/kWh) than with the normal tariff (11.76 p/kWh) and 6.8% lower with the high tariff (67.20 p/kWh) compared to the normal tariff. Compared to the model taking the tariff value as continuous, the difference in consumption between low and normal tariffs is predicted to be much greater, as expected. Actually, the drop from high to normal is basically the same as from normal to low.
+
+### Regularised linear regression
+
+Now we will seek to improve our prediction using regularisation methods for linear regression, namely Lasso and Ridge. As most derived features are not completely independent by definition (e.g. the consumption at the same hour on the previous day is also used to calculate the mean of the consumption at the same hour on the previous 3 days), this could lead to overfitting which could be mitigated using these methods. Furthermore, the implementation of Lasso and Ridge regression results in a hypothetical online prediction system is as simple as OLS.
+
+First, we need to import the glmnet library.
+
+```{r import.libs1}
+library(glmnet)
+```
+
+glmnet needs matrices as model inputs so we need to transform our test and train data into matrices. Categorical variables have to be converted to binary dummy variables to include them in each matrix. This can be done easily with model.matrix. We build then X (dependendent variables) and y (independent variable) matrices for the train and test sets and another set of X and y test matrices for ToU data only to analyse the prediction for these users only.
+
+```{r matrix}
+df2.train <- df2[df2['Set'] == 'Train',]
+df2.test <- df2[df2['Set'] == 'Test',]
+
+X.train <- cbind(as.matrix(subset(df2.train, select= -c(DateTime,Set,mean_cons,DoW,ToU,Tariff,Tariff_value))), 
+                 model.matrix( ~ DoW + Tariff, df2.train)[,-1])
+y.train <- as.matrix(subset(df2.train, select= mean_cons))
+
+X.test <- cbind(as.matrix(subset(df2.test, select= -c(DateTime,Set,mean_cons,DoW,ToU,Tariff,Tariff_value))), 
+                model.matrix( ~ DoW + Tariff, df2.test)[,-1])
+y.test <- as.matrix(subset(df2.test, select= mean_cons))
+
+X.ToU.test <- cbind(as.matrix(subset(df2.test, ToU == 1, select= -c(DateTime,Set,mean_cons,DoW,ToU,Tariff,Tariff_value))),
+                    model.matrix( ~ DoW + Tariff, df2.test[df2.test["ToU"]==1,])[,-1])
+
+y.ToU.test <- as.matrix(df2.test[df2.test["ToU"]==1,"mean_cons"])
+```
+
+Note: We subset [-,1] in the call to model.matrix to remove an (Intercept) variable created by this function.
+
+#### Lasso
+
+Lasso regularisation tends to set coefficients to zero, thus reducing the number of predictors in the model. 
+
+First we can plot the regularisation paths. Most variables enter after the vector L1 norm is quite large.
+
+```{r lasso}
+lasso <- glmnet(x = X.train, y = y.train)
+plot(lasso)
+```
+
+We will calculate a Lasso model with 10-fold cross-validation, which is the standard in glmnet. We will use the model with the largest regularisation parameter lambda whose prediction results lie within one standard error of the lambda that yields the minimum MSE (lambda.1se) in order to avoid overfitting.
+
+```{r lasso.summary}
+cvlasso = cv.glmnet(x = X.train, y = y.train)
+plot(cvlasso)
+cvlasso$lambda.1se
+coef(cvlasso, s = "lambda.1se")
+length(coef(cvlasso, s = "lambda.1se")[which(coef(cvlasso, s = "lambda.1se") != 0)])
+```
+
+The MSE - lambda curve is quite smooth and lambda.1se is very small. Thus, regularisation is not very noticeable and the model keeps 25 coefficients out of 30 (including the intercept). All of the variables dropped are engineered features.
+
+```{r cvlasso.pred}
+pred.lasso <- predict(cvlasso, newx = X.test, s = "lambda.1se")
+rmse.lasso <- mean((pred.lasso - y.test)^2)^(1/2)
+rmse.lasso
+rmse.lasso/y.mean
+
+pred.ToU.lasso <- predict(cvlasso, newx = X.ToU.test, s = "lambda.1se")
+rmse.ToU.lasso <- mean((pred.ToU.lasso - y.ToU.test)^2)^(1/2)
+rmse.ToU.lasso
+rmse.ToU.lasso/y.ToU.mean
+```
+
+The RMS is nearly identical to that of OLS in the test data, both for the complete train dataset and considering only ToU data points. This means we have not achieved a significant improvement with this method.
+
+#### Ridge 
+
+Now let us try improving the model using Ridge regularisation. This method favours keeping all predictors but shrinking their coefficients, effectively letting all variables in their model have a (reduced) effect on the prediction.
+
+```{r ridge}
+ridge <- glmnet(x = X.train, y = y.train, alpha = 0)
+plot(ridge)
+```
+
+```{r cvridge.summary}
+cvridge = cv.glmnet(x = X.train, y = y.train, alpha = 0)
+plot(cvridge)
+cvridge$lambda.1se
+coef(cvridge, s = "lambda.1se")
+```
+
+```{r cvridge.pred}
+pred.ridge <- predict(cvridge, newx = X.test, s = "lambda.1se")
+rmse.ridge <- mean((pred.ridge - y.test)^2)^(1/2)
+rmse.ridge
+rmse.ridge/y.mean
+
+pred.ToU.ridge <- predict(cvridge, newx = X.ToU.test, s = "lambda.1se")
+rmse.ToU.ridge <- mean((pred.ToU.ridge - y.ToU.test)^2)^(1/2)
+rmse.ToU.ridge
+rmse.ToU.ridge/y.ToU.mean
+```
+
+RMSE in the test set is 1% higher than that for the OLS and Lasso models, so it seems we have not achieved any improvement neither.
+
+## 4.2.4. Linear models with interactions
+
+To improve our linear models we can add second-order interactions. We will remove the interactions of Holiday with the other variables because there are too few points with Holiday = 1 and some interactions cannot even be calculated (e.g. Holiday with some days of week).
+
+### Ordinary least squares
+
+We will start again with OLS. Adjusted R-squared has improved from 0.946 to 0.970 and normalised RMSE is 2% down to 6.5% compared to the OLS model without interactions.
+
+```{r ols.int}
+ols.int <- lm(mean_cons ~ .^2 - Holiday*. , data = subset(df2, select = -c(DateTime, sum, count, Set, ToU), Set == "Train"))
+summary(ols.int)
+
+pred.ols.int <- predict.lm(ols.int, newdata = subset(df2, Set == "Test", select = -c(Set,mean_cons)))
+rmse.ols.int <- mean((pred.ols.int - subset(df2, Set == "Test")$mean_cons)^2)^(1/2)
+rmse.ols.int
+rmse.ols.int/y.mean
+
+pred.ToU.ols.int <- predict.lm(ols.int, newdata = df2[df2["Set"] == "Test" & df2["ToU"] == 1,])
+rmse.ToU.ols.int <- mean((pred.ToU.ols.int - df2[df2["Set"] == "Test" & df2["ToU"] == 1, "mean_cons"])^2)^(1/2)
+rmse.ToU.ols.int
+rmse.ToU.ols.int/y.ToU.mean
+length(coef(ols.int))
+```
+
+Note that this model has 334 coefficients (counting the intercept). This is a fairly large number that leads us to think Lasso regularisation can be more beneficial than in the simple linear model.
+
+### Lasso
+
+In order to use the glmnet functions for generalised linear regression we need to build the X train and test matrices (y does not change). We will use the model.matrix function to built the new matrices with interactions from the linear ones.
+
+```{r matrices.int}
+X.train.int <- model.matrix(~ .^2 - Holiday*., as.data.frame(X.train))[,-1]
+X.test.int <- model.matrix(~ .^2 - Holiday*., as.data.frame(X.test))[,-1]
+X.ToU.test.int <- model.matrix(~ .^2 - Holiday*., as.data.frame(X.ToU.test))[,-1]
+```
+
+Now we can apply the lasso regularised regression with second-order interactions. As we anticipated, normalised RMSE is now considerably lower compared to the OLS model with second-order interactions (2.5% and 6.5%, respectively). The prediction is also better for ToU points, with normalised RMSE equal to 3.9% (OLS with interactions yielded 8.2%).
+
+```{r lasso.int}
+lasso.int <- glmnet(x = X.train.int, y = y.train)
+
+plot(lasso.int)
+cvlasso.int = cv.glmnet(x = X.train.int, y = y.train)
+plot(cvlasso.int)
+length(coef(cvlasso.int, s = "lambda.1se")[which(coef(cvlasso.int, s = "lambda.1se") != 0)])
+
+pred.lasso.int <- predict(cvlasso.int, newx = X.test.int, s = "lambda.1se")
+rmse.lasso.int <- mean((pred.lasso.int - y.test)^2)^(1/2)
+rmse.lasso.int
+rmse.lasso.int/y.mean
+```
+
+### Ridge
+
+Ridge regression did not fare well with main effects only but we will test with second-order interactions for completeness.
+
+```{r ridge.int}
+ridge.int <- glmnet(x = X.train.int, y = y.train, alpha = 0)
+plot(ridge.int)
+cvridge.int = cv.glmnet(x = X.train.int, y = y.train, alpha = 0)
+plot(cvridge.int)
+
+pred.ridge.int <- predict(cvridge.int, newx = X.test.int, s = "lambda.1se")
+rmse.ridge.int <- mean((pred.ridge.int - y.test)^2)^(1/2)
+rmse.ridge.int
+rmse.ridge.int/y.mean
+
+pred.ToU.ridge.int <- predict(cvridge.int, newx = X.ToU.test.int, s = "lambda.1se")
+rmse.ToU.ridge.int <- mean((pred.ToU.ridge.int - y.ToU.test)^2)^(1/2)
+rmse.ToU.ridge.int
+rmse.ToU.ridge.int/y.ToU.mean
+```
+
+Again, ridge regularisation does not improve OLS results with virtually the same RMSE.
+
+## 4.2.5. Model comparison
+
+We need to import some libraries to treat and plot the data (scales is needed to use datetime scales in ggplot). We also set the locale to English to display the names of the days of the week in English.
+
+```{r import.libs2}
+library(ggplot2)
+library(gridExtra)
+library(zoo)
+library(xts)
+library(scales)
+library(reshape2)
+Sys.setlocale("LC_TIME", "English")
+```
+
+Generating the charts and tables in this section will be much easier if we build a dataframe with the true and predicted values and we separate it in standard and ToU tariffs. In this section we will use the OLS model with the tariff value considered as categorical.
+
+```{r predictions}
+predictions <- cbind.data.frame(df2.test[,c("DateTime","Tariff_value","ToU")], y.test, pred.ols, pred.ols2, pred.lasso, pred.ridge,
+                                pred.ols.int, pred.lasso.int, pred.ridge.int)
+colnames(predictions) <- c("DateTime","Tariff_value","ToU","y.true","y.ols","y.ols2","y.lasso","y.ridge","y.ols.int",
+                           "y.lasso.int","y.ridge.int")
+head(predictions)
+
+predictions.std <- predictions[predictions["ToU"] == 0,]
+predictions.ToU <- predictions[predictions["ToU"] == 1,]
+```
+
+Before plotting the predictions we will calculate the errors for all models and compare them.
+
+$y.ols$ refers to the OLS model that treats the Tariff variable as continuous while ols2 is the model with Tariff as a categorical variable. We will call them OLS_num and OLS_factors respectively. The long format dataframes are generated to plot error histograms.
+
+```{r errors}
+errors.std <- predictions.std
+errors.std[,'y.ols'] <- (predictions.std[,'y.true'] - predictions.std[,'y.ols'])/predictions.std[,'y.true']
+errors.std[,'y.ols2'] <- (predictions.std[,'y.true'] - predictions.std[,'y.ols2'])/predictions.std[,'y.true']
+errors.std[,'y.lasso'] <- (predictions.std[,'y.true'] - predictions.std[,'y.lasso'])/predictions.std[,'y.true']
+errors.std[,'y.ridge'] <- (predictions.std[,'y.true'] - predictions.std[,'y.ridge'])/predictions.std[,'y.true']
+errors.std[,'y.ols.int'] <- (predictions.std[,'y.true'] - predictions.std[,'y.ols.int'])/predictions.std[,'y.true']
+errors.std[,'y.lasso.int'] <- (predictions.std[,'y.true'] - predictions.std[,'y.lasso.int'])/predictions.std[,'y.true']
+errors.std[,'y.ridge.int'] <- (predictions.std[,'y.true'] - predictions.std[,'y.ridge.int'])/predictions.std[,'y.true']
+
+errors.ToU <- predictions.ToU
+errors.ToU[,'y.ols'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.ols'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.ols2'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.ols2'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.lasso'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.lasso'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.ridge'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.ridge'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.ols.int'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.ols.int'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.lasso.int'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.lasso.int'])/predictions.ToU[,'y.true']
+errors.ToU[,'y.ridge.int'] <- (predictions.ToU[,'y.true'] - predictions.ToU[,'y.ridge.int'])/predictions.ToU[,'y.true']
+
+errors.std.long <- melt(errors.std[,c("y.ols", "y.ols2","y.lasso","y.ridge","y.ols.int","y.lasso.int","y.ridge.int")])
+errors.ToU.long <- melt(errors.ToU[,c("y.ols", "y.ols2","y.lasso","y.ridge","y.ols.int","y.lasso.int","y.ridge.int")])
+
+summary(errors.std)
+summary(errors.ToU)
+```
+
+```{r error.plot.std, echo=FALSE}
+ggplot()+
+  geom_freqpoly(data = errors.std.long, aes(value, colour=variable), bins = 300)+
+  labs(title="Error distribution for all models (Standard tariff)",x="Relative error", y="Count")+
+  scale_x_continuous(breaks = seq(-0.5, 0.4, 0.1), minor_breaks = seq(-0.5, 0.4, 0.02))+
+  scale_colour_manual(values = c("darkblue", "blue", "orange","green","skyblue","darkmagenta","forestgreen"),
+                      labels = c("OLS_num", "OLS_factors", "Lasso","Ridge",
+                                 "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"),
+                       guide = guide_legend(title = "Model"))
+```
+
+```{r error.plot.ToU, echo=FALSE}
+ggplot()+
+  geom_freqpoly(data = errors.ToU.long, aes(value, colour=variable), bins = 300)+
+  labs(title="Error distribution for all models (ToU tariff)",x="Relative error", y="Count")+
+  scale_x_continuous(breaks = seq(-0.5, 0.4, 0.1), minor_breaks = seq(-0.5, 0.4, 0.02))+
+  scale_colour_manual(values = c("darkblue", "blue", "orange","green","skyblue","darkmagenta","forestgreen"),
+                      labels = c("OLS_num", "OLS_factors", "Lasso","Ridge",
+                                 "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"),
+                      guide = guide_legend(title = "Model"))
+```
+
+It is clear that Lasso second-order is the model with the lowest error with a very significant difference compared to the rest, as we knew with the RMSE score. The vast majority of the points lie within the +/-0.1 relative error band in this model. Furthermore, the error distribution looks approximately normal, so the assumptions of the linear model hold.
+
+Now we will compare the response variable (mean aggregate consumption) true values with the predicted values of the OLS, Lasso and Ridge models and their second-order counterparts. We will first built an xts object with the predicted values for ease of use and then create some relevant plots.
+
+From now on, we will just consider the the OLS model with Tariff as categorical (OLS_factors in this chart), but before that let us just check the difference in prediction for a week of test data. The prediction is quite similar with OLS_factors faring slightly better on this Sunday. As accuracy is just marginally better (in terms of RMSE and maximum and minimum errors), the main reason to choose this model is that the predicted influence of the Tariff on the consumption is better computed when treated as categorical.
+
+```{r pred.xts}
+X.pred.std <- xts(predictions.std[,c("y.true","y.ols","y.ols2","y.lasso","y.ridge","y.ols.int",
+                                     "y.lasso.int","y.ridge.int")], order.by = predictions.std[,"DateTime"])
+X.pred.ToU <- xts(predictions.ToU[,c("Tariff_value","y.true","y.ols","y.ols2","y.lasso","y.ridge","y.ols.int",
+                                     "y.lasso.int","y.ridge.int")], order.by = predictions.ToU[,"DateTime"])
+```
+
+```{r OLS.plot, echo=FALSE}
+ggplot(data = X.pred.ToU['2013-12-09/15']) + 
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols'], colour="OLS_num"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols2'], colour="OLS_factors"))+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "darkblue", "OLS_factors" = "blue"),guide = guide_legend(title = "Model"))
+```
+
+The next plot compares all linear models and the true values of the response variable for ToU data points. It looks like the models follow the cyclic nature of the true values but there is too much data in the plot to draw any conclusion.
+
+```{r plot1, echo=FALSE}
+ggplot(data = X.pred.ToU) + 
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU), y=X.pred.ToU[,'y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Predicted values of different linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y"), date_breaks = "1 week")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                        "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+
+```
+
+Therefore, we will plot only one week intervals. We will add the tariff plot for the same interval. Then, we will plot another two weeks of standard tariff data.
+
+In general all models capture the cyclic nature of the consumption data. However, simple linear models do not follow well the actual increase of consumption values in the late morning and afternoon hours of Sundays and then overestimate the same period on Mondays. This is probably due to the influence of the features constructed with the consumption of the previous day. This effect can be mitigated by including second-order interactions as it can be seen in the plots. Lasso 2nd order captures this effect much better than the remaining models while OLS and ridge 2nd order also exhibit some improvement, albeit to a lesser extent.
+
+##### ToU tariff
+
+```{r plot3, echo=FALSE}
+pred.plot.2 <- 
+  ggplot(data = X.pred.ToU['2013-10-14/20']) + 
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Predicted values of different linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                        "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+tariff.plot.2 <- 
+  ggplot(data = X.pred.ToU['2013-10-14/20']) + 
+  geom_step(aes(x=index(X.pred.ToU['2013-10-14/20']), y=X.pred.ToU['2013-10-14/20','Tariff_value'], colour = "Tariff (p/kWh)"))+
+  labs(title="ToU Price of Electricity",x="DateTime", y="Tariff [p/kWh]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("Tariff (p/kWh)" = "black"),
+                      guide = guide_legend(title = ""))
+
+grid.arrange(pred.plot.2,tariff.plot.2, ncol = 1, nrow = 2)
+```
+
+```{r plot2, echo=FALSE}
+pred.plot.1 <- 
+  ggplot(data = X.pred.ToU['2013-12-09/15']) + 
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Predicted values of different linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                        guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                          "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+
+tariff.plot.1 <- 
+  ggplot(data = X.pred.ToU['2013-12-09/15']) + 
+  geom_step(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','Tariff_value'], colour = "Tariff (p/kWh)"))+
+  labs(title="ToU Price of Electricity",x="DateTime", y="Tariff [p/kWh]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("Tariff (p/kWh)" = "black"),
+                      guide = guide_legend(title = ""))
+
+grid.arrange(pred.plot.1,tariff.plot.1, ncol = 1, nrow = 2)
+```
+
+##### Standard tariff
+
+```{r plot4, echo=FALSE}
+ggplot(data = X.pred.std['2013-12-09/15']) + 
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.std['2013-12-09/15']), y=X.pred.std['2013-12-09/15','y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Predicted values of different linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                        "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+```
+
+```{r plot5, echo=FALSE}
+ggplot(data = X.pred.std['2014-02-03/09']) + 
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.std['2014-02-03/09']), y=X.pred.std['2014-02-03/09','y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Predicted values of different linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                        "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+```
+
+Finally, the next plot shows the daily averaged data of the whole test dataset for standard tariff users. This is a way of checking whether the model has capture the data seasonality (higher consumption in winter than in summer as we saw in the exploratory data analysis). It looks like all models follow the general trend quite well.
+
+```{r daily, echo=FALSE}
+X.pred.std.daily <- apply.daily(X.pred.std,mean)
+
+ggplot(data = X.pred.std.daily) + 
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.true'], colour = "True values"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.ols2'], colour="OLS"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.lasso'], colour="Lasso"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.ridge'], colour="Ridge"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.ols.int'], colour="OLS 2nd order"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.lasso.int'], colour="Lasso 2nd order"))+
+  geom_line(aes(x=index(X.pred.std.daily), y=X.pred.std.daily[,'y.ridge.int'], colour="Ridge 2nd order"))+
+  labs(title="Daily averaged predicted values of linear models",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%m/%Y"), date_breaks = "1 month")+
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "blue", "Lasso" = "orange","Ridge" = "green",
+                                 "OLS 2nd order" = "skyblue", "Lasso 2nd order" = "darkmagenta", "Ridge 2nd order" = "forestgreen"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "OLS", "Lasso","Ridge",
+                                                                        "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
+```
+
+## 4.2.6. Conclusions
+
+In terms of descriptive statistics, a simple OLS model with R-squared = 0.945 has given us further evidence that the ToU tariff level influences aggregate electricity demand: consumption is 7.2% higher with the low tariff (3.99 p/kWh) than with the normal tariff (11.76 p/kWh) and 6.8% lower with the high tariff (67.20 p/kWh) compared to the normal tariff. Therefore, even though prediction of ToU data has a larger error compared to standard tariff data, it can be concluded that ToU tariff has proven an efficient means of influencing the aggregate demand curve. As discussed in Section 1, this is of capital importance to utilities and the grid operator especially in systems with a high penetration of renewable energy sources.
+
+In terms of machine learning, linear feature modelling has proven to give a good fit to our test data, following its different cyclic trends (daily, weekly, seasonal). Lasso regularisation with second-order interactions is the best model we have tried with a normalised RMSE of 2.5% and provides a very good fit for a relatively simple model. Therefore, it is not necessary to explore more complex models to try to improve the fit. Including interactions has helped improve the fit of the test data especially during Sundays, where the trend of the aggregate electricity consumption during late morning and afternoon is higher than during the rest of the week.
+
+In Section 4.3 we will fit the data using a specific time series model, namely exponential smoothing. In any case, feature modelling has proven effective. More complex feature models are popular in the electricity demand prediction literature and should have been explored if linear models had not given us adequate results. The most widely used of these are different variants of neural networks, such as Artifical Neural Networks (ANN) [4]. Another interesting approach is a time series forecasting based on pattern sequence similarity (PSF), which basically labels each 24-hour segment with clustering methods, then looks for equal sequences in historical data and predicts the demand of the following days by averaging all previous days in the dataset which follow the identified sequence.
