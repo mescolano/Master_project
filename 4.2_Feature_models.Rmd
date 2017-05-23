@@ -5,6 +5,7 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=15, fig.height=8) 
 ```
 
 ## 4.2.1. Introduction
@@ -37,13 +38,13 @@ First, let us download the data and parse the DateTime column to the appropriate
 ```{r data.load}
 df <- read.csv('outputs/features_model.csv')
 df$DateTime <- as.POSIXct(df$DateTime, tz= "Europe/London", format = "%Y-%m-%d %H:%M:%S")
-df <- subset(df, select = -c(Date,Year,Month))
+df <- subset(df, select = -c(Date,Year,Month,sum,count))
 head(df)
 ```
 
 ## 4.2.3. Linear models
 
-First, we can calculate the naÃ¯ve predictor: the mean of the response value. We do it for the whole dataset and for standard and ToU separately as we are also interested in knowing how good the models are to predict ToU users aggregate demand.
+First, we can calculate the naïve predictor: the mean of the response value. We do it for the whole dataset and for standard and ToU separately as we are also interested in knowing how good the models are to predict ToU users aggregate demand.
 
 ```{r means}
 y.std.mean <- mean(df[df["ToU"] == 0,"mean_cons"])
@@ -62,20 +63,20 @@ ols <- lm(mean_cons ~ Tariff_value:ToU + Holiday + temperature + humidity + clou
             + mean_last3d_.90 + mean_last3w_.0 + mean_last3w_.30 + mean_last3w_.60 + mean_last3w_.90, data = subset(df, Set == "Train"))
 pred.ols <- predict.lm(ols, newdata = subset(df, Set == "Test", select = -c(Set,mean_cons)))
 rmse.ols <- mean((pred.ols - df[df["Set"] == "Test", "mean_cons"])^2)^(1/2)
-rmse.ols
+```
+
+The normalised RMSE in the test data is:
+```{r ols.nrmse}
 rmse.ols/y.mean
 ```
 
-The normalised RMSE in the test data is 8.6%. 
+And for ToU data only it is:
 
 ```{r ToU.ols.fit}
 pred.ToU.ols <- predict.lm(ols, newdata = df[df["Set"] == "Test" & df["ToU"] == 1,])
 rmse.ToU.ols <- mean((pred.ToU.ols - df[df["Set"] == "Test" & df["ToU"] == 1, "mean_cons"])^2)^(1/2)
-rmse.ToU.ols
 rmse.ToU.ols/y.ToU.mean
 ```
-
-For ToU data points the RMSE is 10%. 
 
 It is also interesting to look at the regression coefficients.
 
@@ -85,10 +86,11 @@ ols$coefficients['Tariff_value:ToU']*(67.20 - 11.76)/y.ToU.mean
 ols$coefficients['Tariff_value:ToU']*(3.99 - 11.76)/y.ToU.mean
 ```
 
-An advantage of OLS is that we can interpret the model easily, identifying the effect of each predictor in the independent variable. All derived features have a significant effect at the 5% level (and all but one at 0.1%). Only holiday has a small and non-significant effect in predicting the electricity consumption. Furthermoer, the tariff value has a significant negative effect (meaning less consumption when the price of electricty is higher) for ToU users, suggesting that a significant portion of them have responded to this stimulus as we analysed in Section 3. The regression coeffcient indicates 9% less consumption with the high tariff compared to the normal tariff.
+An advantage of OLS is that we can interpret the model easily, identifying the effect of each predictor in the independent variable. All derived features have a significant effect at the 5% level (and all but one at 0.1%). Only holiday has a small and non-significant effect in predicting the electricity consumption. Furthermore, the tariff value has a significant negative effect (meaning less consumption when the price of electricty is higher) for ToU users, suggesting that a significant portion of them have responded to this stimulus as we analysed in Section 3. The regression coeffcient indicates 9% less consumption with the high tariff compared to the normal tariff.
 
 However, as it has been discussed, treating the tariff value as a continuous variable is probably not a good approach as there are only 3 possible tariff levels for ToU users, and they are not equally spaced. Therefore, we will do another prediction with the same OLS model but included the tariff value as a categorical variable.
 
+The normalised RMSE for this model is:
 ```{r ols2.fit}
 df2 <- df
 df2$Tariff <- as.factor(df2$Tariff_value)
@@ -99,18 +101,19 @@ ols2 <- lm(mean_cons ~ Tariff + Holiday + temperature + humidity + cloudCover + 
             + mean_cons_.1380 + mean_cons_.1410 + mean_cons_.1440 + mean_last3d_.0 + mean_last3d_.30 + mean_last3d_.60 + 
             + mean_last3d_.90 + mean_last3w_.0 + mean_last3w_.30 + mean_last3w_.60 + mean_last3w_.90, data = subset(df2, Set == "Train"))
 pred.ols2 <- predict.lm(ols2, newdata = subset(df2, Set == "Test", select = -c(Set,mean_cons)))
-mse.ols2 <- mean((pred.ols2 - subset(df2, Set == "Test")$mean_cons)^2)
-mse.ols2
-mse.ols2/y.mean
+rmse.ols2 <- mean((pred.ols2 - subset(df2, Set == "Test")$mean_cons)^2)^(1/2)
+rmse.ols2/y.mean
+```
 
+And for ToU points only:
+```{r ols2.tou}
 pred.ToU.ols2 <- predict.lm(ols2, newdata = df2[df2["Set"] == "Test" & df2["ToU"] == 1,])
-mse.ToU.ols2 <- mean((pred.ToU.ols2 - df2[df2["Set"] == "Test" & df2["ToU"] == 1, "mean_cons"])^2)
-mse.ToU.ols2
-mse.ToU.ols2/y.ToU.mean
+rmse.ToU.ols2 <- mean((pred.ToU.ols2 - df2[df2["Set"] == "Test" & df2["ToU"] == 1, "mean_cons"])^2)^(1/2)
+rmse.ToU.ols2/y.ToU.mean
 
 ```
 
-R-squared is 0.946 and RMSE values is just marginally better in the second model.
+R-squared is 0.946 and RMSE is marginally higher than in the first model.
 
 ```{r ols2.summary}
 summary(ols2)
@@ -178,7 +181,7 @@ coef(cvlasso, s = "lambda.1se")
 length(coef(cvlasso, s = "lambda.1se")[which(coef(cvlasso, s = "lambda.1se") != 0)])
 ```
 
-The MSE - lambda curve is quite smooth and lambda.1se is very small. Thus, regularisation is not very noticeable and the model keeps 25 coefficients out of 30 (including the intercept). All of the variables dropped are engineered features.
+The MSE - lambda curve is quite smooth and lambda.1se is very small. Thus, regularisation is not very noticeable and the model keeps 23 coefficients out of 28 (including the intercept). All of the variables dropped are engineered features.
 
 ```{r cvlasso.pred}
 pred.lasso <- predict(cvlasso, newx = X.test, s = "lambda.1se")
@@ -192,7 +195,7 @@ rmse.ToU.lasso
 rmse.ToU.lasso/y.ToU.mean
 ```
 
-The RMS is nearly identical to that of OLS in the test data, both for the complete train dataset and considering only ToU data points. This means we have not achieved a significant improvement with this method.
+The RMSE is nearly identical to that of OLS in the test data, both for the complete train dataset and considering only ToU data points. This means we have not achieved a significant improvement with this method.
 
 #### Ridge 
 
@@ -207,7 +210,6 @@ plot(ridge)
 cvridge = cv.glmnet(x = X.train, y = y.train, alpha = 0)
 plot(cvridge)
 cvridge$lambda.1se
-coef(cvridge, s = "lambda.1se")
 ```
 
 ```{r cvridge.pred}
@@ -230,20 +232,17 @@ To improve our linear models we can add second-order interactions. We will remov
 
 ### Ordinary least squares
 
-We will start again with OLS. Adjusted R-squared has improved from 0.946 to 0.970 and normalised RMSE is 2% down to 6.5% compared to the OLS model without interactions.
+We will start again with OLS. Adjusted R-squared has improved from 0.945 to 0.971 and normalised RMSE has also improved down to 6.5% compared to 8.5% the OLS model without interactions. For ToU points the prediction has improved with a decrease in RMSE of over 1%.
 
 ```{r ols.int}
-ols.int <- lm(mean_cons ~ .^2 - Holiday*. , data = subset(df2, select = -c(DateTime, sum, count, Set, ToU), Set == "Train"))
-summary(ols.int)
+ols.int <- lm(mean_cons ~ .^2 - Holiday*. , data = subset(df2, select = -c(DateTime, Set, ToU), Set == "Train"))
 
 pred.ols.int <- predict.lm(ols.int, newdata = subset(df2, Set == "Test", select = -c(Set,mean_cons)))
 rmse.ols.int <- mean((pred.ols.int - subset(df2, Set == "Test")$mean_cons)^2)^(1/2)
-rmse.ols.int
 rmse.ols.int/y.mean
 
 pred.ToU.ols.int <- predict.lm(ols.int, newdata = df2[df2["Set"] == "Test" & df2["ToU"] == 1,])
 rmse.ToU.ols.int <- mean((pred.ToU.ols.int - df2[df2["Set"] == "Test" & df2["ToU"] == 1, "mean_cons"])^2)^(1/2)
-rmse.ToU.ols.int
 rmse.ToU.ols.int/y.ToU.mean
 length(coef(ols.int))
 ```
@@ -260,7 +259,7 @@ X.test.int <- model.matrix(~ .^2 - Holiday*., as.data.frame(X.test))[,-1]
 X.ToU.test.int <- model.matrix(~ .^2 - Holiday*., as.data.frame(X.ToU.test))[,-1]
 ```
 
-Now we can apply the lasso regularised regression with second-order interactions. As we anticipated, normalised RMSE is now considerably lower compared to the OLS model with second-order interactions (2.5% and 6.5%, respectively). The prediction is also better for ToU points, with normalised RMSE equal to 3.9% (OLS with interactions yielded 8.2%).
+Now we can apply the lasso regularised regression with second-order interactions. Lasso regularisation has not really improved the OLS second-order interaction results.
 
 ```{r lasso.int}
 lasso.int <- glmnet(x = X.train.int, y = y.train)
@@ -272,8 +271,13 @@ length(coef(cvlasso.int, s = "lambda.1se")[which(coef(cvlasso.int, s = "lambda.1
 
 pred.lasso.int <- predict(cvlasso.int, newx = X.test.int, s = "lambda.1se")
 rmse.lasso.int <- mean((pred.lasso.int - y.test)^2)^(1/2)
-rmse.lasso.int
 rmse.lasso.int/y.mean
+```
+
+```{r lasso.tou}
+pred.ToU.lasso <- predict(cvlasso, newx = X.ToU.test, s = "lambda.1se")
+rmse.ToU.lasso <- mean((pred.ToU.lasso - y.ToU.test)^2)^(1/2)
+rmse.ToU.lasso/y.ToU.mean
 ```
 
 ### Ridge
@@ -288,16 +292,14 @@ plot(cvridge.int)
 
 pred.ridge.int <- predict(cvridge.int, newx = X.test.int, s = "lambda.1se")
 rmse.ridge.int <- mean((pred.ridge.int - y.test)^2)^(1/2)
-rmse.ridge.int
 rmse.ridge.int/y.mean
 
 pred.ToU.ridge.int <- predict(cvridge.int, newx = X.ToU.test.int, s = "lambda.1se")
 rmse.ToU.ridge.int <- mean((pred.ToU.ridge.int - y.ToU.test)^2)^(1/2)
-rmse.ToU.ridge.int
 rmse.ToU.ridge.int/y.ToU.mean
 ```
 
-Again, ridge regularisation does not improve OLS results with virtually the same RMSE.
+Again, ridge regularisation does not improve OLS results with a normalised RMSE over 1% higher.
 
 ## 4.2.5. Model comparison
 
@@ -378,7 +380,7 @@ ggplot()+
                       guide = guide_legend(title = "Model"))
 ```
 
-It is clear that Lasso second-order is the model with the lowest error with a very significant difference compared to the rest, as we knew with the RMSE score. The vast majority of the points lie within the +/-0.1 relative error band in this model. Furthermore, the error distribution looks approximately normal, so the assumptions of the linear model hold.
+The error distribution looks approximately normal for all models, so the assumptions of the linear model hold. Lasso 2nd order is the model with smaller maximum and minimum error and a more centred distribution.
 
 Now we will compare the response variable (mean aggregate consumption) true values with the predicted values of the OLS, Lasso and Ridge models and their second-order counterparts. We will first built an xts object with the predicted values for ease of use and then create some relevant plots.
 
@@ -397,7 +399,8 @@ ggplot(data = X.pred.ToU['2013-12-09/15']) +
   geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols'], colour="OLS_num"))+
   geom_line(aes(x=index(X.pred.ToU['2013-12-09/15']), y=X.pred.ToU['2013-12-09/15','y.ols2'], colour="OLS_factors"))+
   scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
-  scale_colour_manual(values = c("True values" = "black", "OLS" = "darkblue", "OLS_factors" = "blue"),guide = guide_legend(title = "Model"))
+  scale_colour_manual(values = c("True values" = "black", "OLS" = "darkblue", "OLS_factors" = "blue"),guide = guide_legend(title = "Model"))+
+  labs(title="Predicted values of OLS models",x="DateTime", y="Mean consumption [kWh/30min]")
 ```
 
 The next plot compares all linear models and the true values of the response variable for ToU data points. It looks like the models follow the cyclic nature of the true values but there is too much data in the plot to draw any conclusion.
@@ -421,8 +424,6 @@ ggplot(data = X.pred.ToU) +
 ```
 
 Therefore, we will plot only one week intervals. We will add the tariff plot for the same interval. Then, we will plot another two weeks of standard tariff data.
-
-In general all models capture the cyclic nature of the consumption data. However, simple linear models do not follow well the actual increase of consumption values in the late morning and afternoon hours of Sundays and then overestimate the same period on Mondays. This is probably due to the influence of the features constructed with the consumption of the previous day. This effect can be mitigated by including second-order interactions as it can be seen in the plots. Lasso 2nd order captures this effect much better than the remaining models while OLS and ridge 2nd order also exhibit some improvement, albeit to a lesser extent.
 
 ##### ToU tariff
 
@@ -517,6 +518,9 @@ ggplot(data = X.pred.std['2014-02-03/09']) +
                                                                         "OLS 2nd order","Lasso 2nd order","Ridge 2nd order"))
 ```
 
+
+In general all models capture the cyclic nature of the consumption data. However, they do not follow well the actual increase of consumption values in the late morning and afternoon hours of Sundays and then overestimate the same period on Mondays. This is probably due to the influence of the features constructed with the consumption of the previous day. This effect has been mitigated by including second-order interactions in the OLS and Lasso models, but it is noticeable.
+
 Finally, the next plot shows the daily averaged data of the whole test dataset for standard tariff users. This is a way of checking whether the model has capture the data seasonality (higher consumption in winter than in summer as we saw in the exploratory data analysis). It looks like all models follow the general trend quite well.
 
 ```{r daily, echo=FALSE}
@@ -542,6 +546,6 @@ ggplot(data = X.pred.std.daily) +
 
 In terms of descriptive statistics, a simple OLS model with R-squared = 0.945 has given us further evidence that the ToU tariff level influences aggregate electricity demand: consumption is 7.2% higher with the low tariff (3.99 p/kWh) than with the normal tariff (11.76 p/kWh) and 6.8% lower with the high tariff (67.20 p/kWh) compared to the normal tariff. Therefore, even though prediction of ToU data has a larger error compared to standard tariff data, it can be concluded that ToU tariff has proven an efficient means of influencing the aggregate demand curve. As discussed in Section 1, this is of capital importance to utilities and the grid operator especially in systems with a high penetration of renewable energy sources.
 
-In terms of machine learning, linear feature modelling has proven to give a good fit to our test data, following its different cyclic trends (daily, weekly, seasonal). Lasso regularisation with second-order interactions is the best model we have tried with a normalised RMSE of 2.5% and provides a very good fit for a relatively simple model. Therefore, it is not necessary to explore more complex models to try to improve the fit. Including interactions has helped improve the fit of the test data especially during Sundays, where the trend of the aggregate electricity consumption during late morning and afternoon is higher than during the rest of the week.
+In terms of machine learning, linear feature modelling has proven to give a good fit to our test data, following its different cyclic trends (daily, weekly, seasonal). OLS with second-order interactions has proven the best model with a normalised RMSE of 6.5%. Therefore, it is not necessary to explore more complex feature models to try to improve the fit. The inclusion of second-order interactions have improved the prediction of the aggregate demand on Sunday late mornings and early afternoons, where the actual demand is higher than in the rest of the week and on Monday during the same periods. However, there is still an opportunity to improve the model during these periods. 
 
 In Section 4.3 we will fit the data using a specific time series model, namely exponential smoothing. In any case, feature modelling has proven effective. More complex feature models are popular in the electricity demand prediction literature and should have been explored if linear models had not given us adequate results. The most widely used of these are different variants of neural networks, such as Artifical Neural Networks (ANN) [4]. Another interesting approach is a time series forecasting based on pattern sequence similarity (PSF), which basically labels each 24-hour segment with clustering methods, then looks for equal sequences in historical data and predicts the demand of the following days by averaging all previous days in the dataset which follow the identified sequence.
