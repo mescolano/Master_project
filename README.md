@@ -1,7 +1,7 @@
 # TFM_LondonSmartMeter
 first commit
 
-This folder contains the project to graduate in the Master in Data Science at KSchool (Madrid). 
+This folder contains the graduation project for the Master in Data Science 2016/17 at KSchool (Madrid). 
 
 This work attempts to analyse the public dataset London Smart Meters which contains 30-min consumption data between November 2011 and 
 February 2014 of over 5500 London households. Some of these are subjected to a Dynamic Time of Use tariff in 2013. It is done in Python, R
@@ -13,7 +13,7 @@ Therefore the scope is constrained to:
 -Evaluating whether Dynamic Time of Use tariffs introduce a behavioural change in the consumers and analysing:
 
   --if this change is beneficial for the consumer (lower mean price per kWh).
-  --if this change is beneficial for the utility (less variable demand, lower peaks, more predictable demand...)
+  --if this change is beneficial for the utility (e.g. more predictable demand).
   
 -Evaluating if customer behavioural changes are influenced by their socioeconomical status (using ACORN grouping available in the dataset).
 
