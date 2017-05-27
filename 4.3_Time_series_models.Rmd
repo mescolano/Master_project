@@ -1,0 +1,325 @@
+---
+title: "4.3. Aggregate demand prediction with time series models"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=15, fig.height=8) 
+```
+
+## 4.3.1. Introduction
+
+Now we will use some time series models to model our data, namely Exponential smoothing and Bayesian structural time series Markov Chain Monte Carlo (MCMC) models. We will add regression terms to include the effect of weather variables and holidays.
+
+## 4.3.2. Exponential smoothing
+
+For Exponential smoothing modelling we will use R forecast library, which includes various functions for this purpose. The main drawback is that it does not allow to implement predictor time series variables to the model. Furthermore, these models require unique and equally spaced timestamps in the time series so we should model standard and ToU series separately. The problem is that for the ToU series our data only comprises one natural year, so if we model a whole year we cannot have a separate test sample to validate our prediction. Therefore, we will only model the standard tariff time series and compare it to the feature models prediction.
+
+```{r libs1}
+library(zoo)
+library(xts)
+library(forecast)
+library(ggplot2)
+library(scales)
+Sys.setlocale("LC_TIME", "English")
+```
+
+First we will load the data and do the necessary transformations. We will use the file we created in Section 4.1 for time series models (i.e. before we created the features).
+
+```{r data.load}
+dft <- read.csv('outputs/tseries_model.csv')
+dft$DateTime <- as.POSIXct(dft$DateTime, tz= "GMT", format = "%Y-%m-%d %H:%M:%S")
+head(dft)
+dft.std <- dft[dft['ToU'] == 0,]
+```
+
+In order to use the functions in the forecast library we need to convert our time series into a msts (Multi-seasonal time series) object, which is also provided by this library. In this object, we need to specify the seasonality periods of our time series and a start date. We create an msts object with our train standard tariff data with seasonal periods of daily, weekly and yearly frequency (the values in the seasonal.periods argument are the amount of 30-min intervals contained in each of these longer periods). We feed the start argument with the start of our time series expressed in decimal years.
+
+```{r y.train}
+yr.fraction <- as.numeric(difftime(dft.std[1,'DateTime'], as.POSIXct("2011-01-01 00:00:00"), units = "days"))/as.numeric(difftime(as.POSIXct("2012-01-01 00:00:00"), as.POSIXct("2011-01-01 00:00:00"), units = "days"))
+
+y.train.std <- msts(dft.std[dft.std['Set'] == 'Train', 'mean'], seasonal.periods = c(48,336,17532), start = 2011+yr.fraction)
+y.test.std <- xts(dft.std[dft.std['Set'] == 'Test', 'mean'], order.by = dft.std[dft.std['Set'] == 'Test', 'DateTime'])
+```
+
+The basic exponential smoothing models in function ets do not work. Here, we specified a model with additive errors, additive trend and additive seasonal components. We get an error stating the frequency of our time series is too high and we certainly need a seasonal component in our model. This happens because this function was designed for lower frequency problems.
+
+```{r ets, error = TRUE}
+ets(y.train.std, model="AAA")
+```
+
+We will then try to use the tbats function, also in the forecast library. This is more flexible and implements the TBATS model (Exponential smoothing state space model with Box-Cox transformation, ARMA errors, Trend and Seasonal components). We will allow AR and MA components, but not Box-Cox transformation. Again, we have to specify the time series seasonality.
+
+```{r tbats0}
+tbats1 <- tbats(y.train.std, use.box.cox = FALSE, seasonal.periods = c(48,336,17532), num.cores = NULL)
+pred.tbats1 <- predict(tbats1, length(y.test.std))
+tbats1
+```
+
+The tbats function adjusted the AR and MA components to the best model and set them to 0. Thus, the model is an exponential smoothing model with the 3 seasonality periods. We can plot the decomposition of our model in the level and 3 seasonal components.
+
+```{r tbats1}
+plot(tbats1)
+```
+
+We can also plot the prediction. An advantage of these methods is that they include error bands (80% and 95% confidences in this case). In this chart we can see that the bands get wider as we go forward in time and at a very quick pace, because predictions further into the future rely more and more in terms that have been predicted by the model. Furthermore, the bands extend quicky to absurd values: below zero, which is physically impossible (users in this network cannot inject energy intro the grid) and physically possible but too high values. This can easily be mitigated by capping the minimum and maximum values for the confidence bands but anyway these models shouldn't be used to predict more than one month or so into the future.
+
+```{r tbats2}
+plot(pred.tbats1)
+```
+
+Now let us do some basic diagnostics. The ACF (Autocorrelation function) plot of the model residuals shows remaining seasonality. In particular there are very high ACF regular peaks. In the first chart we plotted the first 1000 residuals (500 h) and then only the first 100 to be able to identify that these peaks are repeated every 48 cycles, i.e. 1 day. Furthermore, every seventh peak is larger indicating remaining weekly seasonality. There is also some remaining autocorrelation nearly in every residual but not as significant as that in the aforementioned main seasonality periods. The problem is that we have already included daily and weekly seasonality in our model. This is not good news as we cannot force new Fourier series terms into the tbats function.
+
+```{r tbats3}
+acf(resid(tbats1),lag.max = 1000)
+acf(resid(tbats1),lag.max = 100)
+```
+
+Anyway, we will continue analysing this model. The normalised RMSE for the test dataset is:
+```{r tbats4}
+mean((pred.tbats1$mean - coredata(y.test.std))^2)^(1/2)/mean(coredata(y.test.std))
+```
+
+This is worse than for the feature models but as we have seen the prediction over time. For the first two days it is equal to:
+```{r tbats5}
+mean((pred.tbats1$mean[1:96] - coredata(y.test.std)[1:96])^2)^(1/2)/mean(coredata(y.test.std)[1:96])
+```
+which is still worse than the OLS linear feature model.
+
+We should bear in mind that we have only used the time series, i.e. no weather or holiday effects have been included. A problem of the R forecast tbats function does not allow the inclusion of a regression baseline, which we could use to include our weather data. A workaround is to correct the prediction with the coefficients calculated by the linear OLS in Section 4.2. The correction must be unbiased so we will first calculate its mean and then substract it. This is what we will do now.
+
+```{r ols.load, ECHO=FALSE}
+df <- read.csv('outputs/features_model.csv')
+df$DateTime <- as.POSIXct(df$DateTime, tz= "GMT", format = "%Y-%m-%d %H:%M:%S")
+df <- subset(df, select = -c(Date,Year,Month,sum,count))
+head(df)
+y.std.mean <- mean(df[df["ToU"] == 0,"mean_cons"])
+df2 <- df
+df2$Tariff <- as.factor(df2$Tariff_value)
+levels(df2$Tariff) <- c("ToU_Low", "ToU_Normal", "Std", "ToU_High")
+df2$Tariff <- relevel(df2$Tariff, "Std")
+
+ols2 <- lm(mean_cons ~ Tariff + Holiday + temperature + humidity + cloudCover + pressure + DoW + Time  + mean_prev_day +
+            + mean_cons_.1380 + mean_cons_.1410 + mean_cons_.1440 + mean_last3d_.0 + mean_last3d_.30 + mean_last3d_.60 + 
+            + mean_last3d_.90 + mean_last3w_.0 + mean_last3w_.30 + mean_last3w_.60 + mean_last3w_.90, data = subset(df2, Set == "Train"))
+
+pred.std.ols2 <- predict.lm(ols2, newdata = df2[df2["Set"] == "Test" & df2["ToU"] == 0,])
+```
+
+```{r correction}
+pred.w <- dft.std[,c("DateTime","Holiday","temperature","humidity","cloudCover","pressure","Set")]
+pred.w$DateTime <- as.POSIXct(pred.w$DateTime, tz= "GMT", format = "%Y-%m-%d %H:%M:%S")
+
+pred.w[,"y.corr"] <-  pred.w[,"Holiday"]*coef(ols2)["Holiday"] + 
+                      pred.w[,"temperature"]*coef(ols2)["temperature"]+pred.w[,"humidity"]*coef(ols2)["humidity"] + 
+                      pred.w[,"cloudCover"]*coef(ols2)["cloudCover"]+ pred.w[,"pressure"]*coef(ols2)["pressure"]
+
+intercept.corr.std <- -mean(pred.w[pred.w["Set"] == "Train","y.corr"])
+
+pred.w <- pred.w[pred.w["Set"] == "Test",]
+
+pred.w[,"y.corr"] <- intercept.corr.std +  pred.w[,"Holiday"]*coef(ols2)["Holiday"] + 
+  pred.w[,"temperature"]*coef(ols2)["temperature"]+pred.w[,"humidity"]*coef(ols2)["humidity"] + 
+  pred.w[,"cloudCover"]*coef(ols2)["cloudCover"]+ pred.w[,"pressure"]*coef(ols2)["pressure"]
+tbats.corr <- xts(cbind(pred.w[,"y.corr"],as.numeric(pred.tbats1$mean),as.numeric(pred.tbats1$upper[,1]), as.numeric(pred.tbats1$upper[,2]),
+                  as.numeric(pred.tbats1$lower[,1]), as.numeric(pred.tbats1$lower[,2])),order.by = pred.w[,"DateTime"])
+
+tbats.corr <- na.omit(tbats.corr)
+
+colnames(tbats.corr) <- c('y.corr','y.tbats','y.tbats.upper.80','y.tbats.upper.95','y.tbats.lower.80','y.tbats.lower.95')
+
+tbats.corr$y.tbats.corr <- tbats.corr[,'y.corr'] + tbats.corr[,'y.tbats']
+tbats.corr$y.tbats.upper.80 <- tbats.corr[,'y.corr'] + tbats.corr[,'y.tbats.upper.80']
+tbats.corr$y.tbats.upper.95 <- tbats.corr[,'y.corr'] + tbats.corr[,'y.tbats.upper.95']
+tbats.corr$y.tbats.lower.80 <- tbats.corr[,'y.corr'] + tbats.corr[,'y.tbats.lower.80']
+tbats.corr$y.tbats.lower.95 <- tbats.corr[,'y.corr'] + tbats.corr[,'y.tbats.lower.95']
+pred.std <- cbind(y.test.std, tbats.corr[,c('y.tbats','y.tbats.corr','y.tbats.upper.80','y.tbats.upper.95','y.tbats.lower.80','y.tbats.lower.95')])
+colnames(pred.std) <- c('y.true','y.tbats','y.tbats.corr','y.tbats.upper.80','y.tbats.upper.95','y.tbats.lower.80','y.tbats.lower.95')
+```
+
+The normalised RMSE of the corrected model is:
+```{r tbats6}
+mean((pred.std[,'y.tbats.corr'] - pred.std[,'y.true'])^2)^(1/2)/mean(pred.std[,'y.true'])
+```
+so it seems it has not really improved.
+
+Now let us plot the first week of predicted data. The model follows the true values well, haveing identified the daily seasonality of the true data and also adapts to inter-day differences. When compared to the linear feature models, the consumption during the more variable 8-15 h plateau is at least as good, if not better (as on the Sunday). The confidence intervals are already quite wide (and hitting negative values) on the second day.
+
+```{r tbats.plot1, echo = FALSE}
+ggplot(data=pred.std['2013-10-01/07'])+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats'], colour = "TBATS"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats.corr'], colour = "corrected TBATS"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats.upper.80'], colour = "upper", linetype = "upper80"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats.lower.80'], colour = "lower", linetype = "lower80"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats.upper.95'], colour = "upper", linetype = "upper95"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.tbats.lower.95'], colour = "lower", linetype = "lower95"))+
+  labs(title="Predicted values of TBATS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_y_continuous(limits = c(0, 0.4))+
+  scale_colour_manual(values = c("True values" = "black", "TBATS" = "orange", "corrected TBATS" = "darkmagenta",
+                                 "upper" = "grey", "lower" = "darkgrey" ),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "TBATS","corrected TBATS"))+
+  scale_linetype_manual(values = c("upper80" = "dotted", "lower80" = "dotted", "upper95" = "dashed",
+                                   "lower95" = "dashed"),
+                        guide = guide_legend(title = "Confidence intervals for TBATS"), breaks = c("upper80", "lower80","upper95","lower95"))
+
+```
+
+However, the model deteriorates more quickly than the feature models, even if it still captures the general cyclic nature of the data. In this week of December which we also plotted for all models analysed in Section 4.2, not only the model has the same problems in predicting the consumption during the 8-15 h plateau but does not follow the peaks nor the troughs. In comparison, the feature models managed to follow both daily peaks and troughs much closer.
+
+```{r tbats.plot2, echo = FALSE}
+ggplot(data=pred.std['2013-12-09/15'])+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats'], colour = "TBATS"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats.corr'], colour = "corrected TBATS"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats.upper.80'], colour = "upper", linetype = "upper80"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats.lower.80'], colour = "lower", linetype = "lower80"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats.upper.95'], colour = "upper", linetype = "upper95"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.tbats.lower.95'], colour = "lower", linetype = "lower95"))+
+  labs(title="Predicted values of TBATS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_y_continuous(limits = c(0, 0.4))+
+  scale_colour_manual(values = c("True values" = "black", "TBATS" = "orange", "corrected TBATS" = "darkmagenta",
+                                 "upper" = "grey", "lower" = "darkgrey" ),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "TBATS","corrected TBATS"))+
+  scale_linetype_manual(values = c("upper80" = "dotted", "lower80" = "dotted", "upper95" = "dashed",
+                                   "lower95" = "dashed"),
+                        guide = guide_legend(title = "Confidence intervals for TBATS"), breaks = c("upper80", "lower80","upper95","lower95"))
+```
+
+## 4.3.3. Bayesian structural time series MCMC
+
+Now we will fit our data with another time series model, Bayesian structural time series. This is implemented in the R bsts package. It uses Markov Chain Monte Carlo (MCMC) to sample from the posterior distribution of a Bayesian structural time series model. An advantage is that it allows the inclusion of a time series regression component with contemporaneous predictor variables (using the usual R formula notation y ~ x1 + x2 + ...).
+
+```{r libs2}
+library(bsts)
+```
+
+We will create the test and train matrices for the response variable y and the predictor variables X (joining both in one matrix).
+
+```{r bsts0}
+yX.train.std <- xts(dft.std[dft.std['Set'] == 'Train', c("mean", "Holiday","temperature","humidity","cloudCover","pressure")], 
+                   order.by = dft.std[dft.std['Set'] == 'Train', 'DateTime'])
+
+yX.test.std <- xts(dft.std[dft.std['Set'] == 'Test', c("mean", "Holiday","temperature","humidity","cloudCover","pressure")], 
+                   order.by = dft.std[dft.std['Set'] == 'Test', 'DateTime'])
+```
+
+In bsts we also have to specify the seasonal components, but in this case it is done one by one with the AddSeasonal function. 
+
+nseasons specifies the number of distinct seasons and season.duration the number of steps in the time series that make up each season. In this case, we first specify 48 distinct half-hours with a duration of 1 step (30 mins), 7 days with a duration of 48 half-hours (for weekly seasonality, there are 7 days in a week) and 52 weeks for yearly seasonality. Monthly seasonality could have been more convenient but it cannot be implemented easily as months have variable duration. It is true that we are incurring in a small error here as 52 weeks are equal to 364 days.
+
+```{r bsts1}
+ss <- AddSeasonal(list(), yX.train.std[,'mean'], nseasons = 48, season.duration = 1)
+ss1 <- AddSeasonal(ss, yX.train.std[,'mean'], nseasons = 7, season.duration = 48)
+ss2 <- AddSeasonal(ss1, yX.train.std[,'mean'], nseasons = 52, season.duration = 48*7)
+```
+
+We could use bsts::add.holidays to add our bank holidays but it does not allow the specification of different bank holidays every year (either a fixed date, or the Nth day in the Mth week of a month). This is not flexible enough in our case so we have specified if a day is a bank holiday with a binary variable in our predictor matrix X.
+
+Now we can train our model and calculate the prediction for our test data.
+
+```{r bsts2}
+bsts1 <- bsts(mean ~ ., state.specification = ss2, data = yX.train.std, niter = 100)
+
+y.pred.bsts <- predict.bsts(bsts1, newdata = yX.test.std[,c("Holiday","temperature","humidity","cloudCover","pressure")])
+```
+
+The normalised RMSE for the test data is:
+```{r bsts3}
+mean((y.pred.bsts$mean - coredata(y.test.std))^2)^(1/2)/mean(coredata(y.test.std))
+```
+which is better than that of the exponential smoothing model but worse than the feature models in Section 4.2.
+
+```{r bsts4, echo = FALSE}
+pred.std <- cbind(yX.test.std[,'mean'], y.pred.bsts$mean)
+colnames(pred.std) <- c("y.true","y.pred.bsts")
+```
+
+Now we will compared the values predicted by the BSTS model with the true values of the response variable.
+
+First we can show the default prediction plot. It does not show us much as it is too crowded. Confidence bands are also provided, which expand when predicting further in the future.
+
+```{r plot.bsts0}
+plot(y.pred.bsts)
+```
+
+Comparing the true and predicted values, the BSTS model follows the general trend but there is a clear indication of overfitting, especially in the 8-15 h plateaus and the early morning troughs. The model varies excessively during these periods. It is also more consistent in time compared to exponential smoothing.
+
+```{r plot.bsts1, echo = FALSE}
+ggplot(data=pred.std['2013-10-01/07'])+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.pred.bsts'], colour = "BSTS"))+
+  labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "BSTS" = "blue"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS"))
+```
+
+```{r plot.bsts2, echo = FALSE}
+ggplot(data=pred.std['2013-12-09/15'])+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.pred.bsts'], colour = "BSTS"))+
+  labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")#+
+  scale_colour_manual(values = c("True values" = "black", "BSTS" = "blue"),
+                    guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS"))
+```
+
+```{r plot.bsts3, echo = FALSE}
+ggplot(data=pred.std['2014-02-03/09'])+
+    geom_line(aes(x=index(pred.std['2014-02-03/09']),y=pred.std['2014-02-03/09','y.true'], colour = "True values"))+
+    geom_line(aes(x=index(pred.std['2014-02-03/09']),y=pred.std['2014-02-03/09','y.pred.bsts'], colour = "BSTS"))+
+    labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+    scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")#+
+    scale_colour_manual(values = c("True values" = "black", "BSTS" = "blue"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS"))
+  
+```
+
+Finally, we will check if we can mitigate overfitting by changing the frequency of the yearly component to 4 weeks (resembling a calendar month).
+
+```{r bsts5}
+ss3 <- AddSeasonal(ss1, yX.train.std[,'mean'], nseasons = 52/4, season.duration = 48*7*4)
+
+bsts2 <- bsts(mean ~ ., state.specification = ss3, data = yX.train.std, niter = 100)
+
+y.pred.bsts2 <- predict.bsts(bsts2, newdata = yX.test.std[,c("Holiday","temperature","humidity","cloudCover","pressure")])
+```
+
+In the plots below, the orange line represents the prediction of the new model with the 4-week-frequency yearly component (BSTS 2) while the blue line is our first BSTS model (BSTS 1). We can see that the new model did not achieve our aim: overfitting is even larger than with the first model.
+
+```{r plot.bsts4, echo = FALSE}
+pred.std <- cbind(yX.test.std[,'mean'], y.pred.bsts$mean, y.pred.bsts2$mean)
+colnames(pred.std) <- c("y.true","y.pred.bsts.1","y.pred.bsts.2")
+head(pred.std)
+
+ggplot(data=pred.std['2013-10-01/07'])+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.pred.bsts.1'], colour = "BSTS 1"))+
+  geom_line(aes(x=index(pred.std['2013-10-01/07']),y=pred.std['2013-10-01/07','y.pred.bsts.2'], colour = "BSTS D-W"))+
+  labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "BSTS 1" = "blue", "BSTS D-W" = "orange"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS 1", "BSTS D-W"))
+
+ggplot(data=pred.std['2013-12-09/15'])+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.true'], colour = "True values"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.pred.bsts.1'], colour = "BSTS 1"))+
+  geom_line(aes(x=index(pred.std['2013-12-09/15']),y=pred.std['2013-12-09/15','y.pred.bsts.2'], colour = "BSTS D-W"))+
+  labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+  scale_x_datetime(labels = date_format("%a %d/%m/%Y  %H:%M"), date_breaks = "1 day")+
+  scale_colour_manual(values = c("True values" = "black", "BSTS 1" = "blue", "BSTS D-W" = "orange"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS 1", "BSTS D-W"))
+
+ggplot(data=pred.std['2014-02-03/09'])+
+    geom_line(aes(x=index(pred.std['2014-02-03/09']),y=pred.std['2014-02-03/09','y.true'], colour = "True values"))+
+    geom_line(aes(x=index(pred.std['2014-02-03/09']),y=pred.std['2014-02-03/09','y.pred.bsts.1'], colour = "BSTS 1"))+
+    geom_line(aes(x=index(pred.std['2014-02-03/09']),y=pred.std['2014-02-03/09','y.pred.bsts.2'], colour = "BSTS 2"))+
+    labs(title="Predicted values of BSTS",x="DateTime", y="Mean consumption [kWh/30min]")+
+    scale_x_datetime(labels = date_format("%a %d/%m/%Y  %H:%M"), date_breaks = "1 day")+
+    scale_colour_manual(values = c("True values" = "black", "BSTS 1" = "blue", "BSTS 2" = "orange"),
+                      guide = guide_legend(title = "Model"), breaks = c("True values", "BSTS 1", "BSTS 2"))
+```  
